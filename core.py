@@ -15,6 +15,7 @@ from typing import Callable, Literal, Union
 
 from const import *
 from env import *
+import wwise_hierarchy
 from xlocale import *
 from util import *
 from wwise_hierarchy import *
@@ -268,9 +269,16 @@ class DummyBank:
 
 
 class WwiseBank:
+    key_version = 0x0000008C ^ 0x9211BC20
+    key_id = 0x50C63A23 ^ 0xF3D64A1B
     
     def __init__(self):
-        self.bank_header: bytes = b""
+        # BKHD
+        self.bkhd_size = 0
+        self.version = 0
+        self.id = 0
+        self.bank_header_tail: bytes = b""
+
         self.bank_misc_data: bytes = b""
         self.modified: bool = False
         self.dep: WwiseDep | None = None
@@ -278,7 +286,26 @@ class WwiseBank:
         self.hierarchy: WwiseHierarchy | None = None
         self.content: list[int] = []
         self.file_id: int = 0
-        
+    
+    def bank_header(self) -> bytes:
+        version = self.version ^ self.key_version
+        id = self.id ^ self.key_id
+
+        return "BKHD".encode('utf-8') + self.bkhd_size.to_bytes(4, byteorder="little") + struct.pack("<II", version, id) + self.bank_header_tail
+    
+    def load_bank_header(self, bank_header: bytes):
+        self.bkhd_size = len(bank_header)
+        # decrypt
+        version = struct.unpack("<I", bank_header[:4])[0]
+        version ^= self.key_version
+        id = struct.unpack("<I", bank_header[4:8])[0]
+        id ^= self.key_id
+
+        self.version = version
+        self.id = id
+        self.bank_header_tail = bank_header[8:]
+
+
     def import_hierarchy(self, new_hierarchy: WwiseHierarchy):
         if self.hierarchy == None:
             raise RuntimeError(
@@ -330,7 +357,7 @@ class WwiseBank:
             )
 
         data = bytearray()
-        data += self.bank_header
+        data += self.bank_header()
         offset = 0
         
         #regenerate soundbank from the hierarchy information
@@ -761,10 +788,13 @@ class GameArchive:
                 entry.file_id = toc_header.file_id
                 bank = BankParser()
                 bank.load(toc_file.read(toc_header.toc_data_size-16))
-                entry.bank_header = "BKHD".encode('utf-8') + len(bank.chunks["BKHD"]).to_bytes(4, byteorder="little") + bank.chunks["BKHD"]
+                # parse BKHD
+                entry.load_bank_header(bank.chunks["BKHD"])
                 
                 hirc = WwiseHierarchy(soundbank=entry)
                 try:
+                    # temporary use global variable
+                    wwise_hierarchy.g_bnk_version = entry.version
                     hirc.load(bank.chunks['HIRC'])
                 except KeyError:
                     pass

@@ -11,6 +11,8 @@ from backend.db import SQLiteDatabase
 from log import logger
 from util import *
 
+g_bnk_version = 154
+
 HircType = {
     0x01: "State",
     0x02: "Sound",
@@ -1880,6 +1882,7 @@ class BankSourceStruct:
         self.plugin_id: int = 0
         self.stream_type: int = 0
         self.source_id: int = 0
+        # v154+
         self.cache_id: int = 0
 
         # For some reason, it still work although it's not being updated
@@ -1892,8 +1895,13 @@ class BankSourceStruct:
     @classmethod
     def from_memory_stream(cls, stream: MemoryStream):
         b = BankSourceStruct()
-        b.plugin_id, b.stream_type, b.source_id, b.cache_id, b.mem_size, b.bit_flags = \
-            struct.unpack("<IBIIIB", stream.read(18))
+        
+        if g_bnk_version >= 154:
+            b.plugin_id, b.stream_type, b.source_id, b.cache_id, b.mem_size, b.bit_flags = \
+                struct.unpack("<IBIIIB", stream.read(18))
+        else:
+            b.plugin_id, b.stream_type, b.source_id, b.mem_size, b.bit_flags = \
+                struct.unpack("<IBIIB", stream.read(14))
         if (b.plugin_id & 0x0F) == 2:
             if b.plugin_id:
                 b.plugin_size = stream.uint32_read()
@@ -2315,13 +2323,39 @@ class FxChunk:
     fxId - tid
     bitVector - U8x
     """
+    
+    @classmethod
+    def from_memory_stream(cls, stream: MemoryStream):
+        if g_bnk_version >= 154:
+            return cls(
+                stream.uint8_read(),
+                stream.uint32_read(),
+                bitVector = stream.uint8_read(),
+            )
+        else:
+            return cls(
+                stream.uint8_read(),
+                stream.uint32_read(),
+                bIsShareSet = stream.uint8_read(),
+                bIsRendered = stream.uint8_read(),
+            )
 
     def __init__(
-        self, uFxIndex: int, fxId: int, bitVector: int
+        self,
+        uFxIndex: int = 0,
+        fxId: int = 0,
+        bitVector = None,
+        bIsShareSet = None,
+        bIsRendered = None
     ):
         self.uFxIndex: int = uFxIndex # U8i
         self.fxId: int = fxId # tid
-        self.bitVector: int = bitVector # U8x
+        # v154+
+        self.bitVector: int | None = bitVector # U8x
+        # v141
+        self.bIsShareSet: int | None = bIsShareSet
+        # v141
+        self.bIsRendered: int | None = bIsRendered
 
     def get_data(self):
         return struct.pack(
@@ -2739,25 +2773,47 @@ class StateProp:
         return struct.pack("<3B", self.propertyId, self.accumType, self.inDb)
 
 class AkPropBundle:
+    """
+    pID U16
+    pValue f32
+    """
+    
     def __init__(self, pID: int, pValue: float):
         self.pID = pID
         self.pValue = pValue
 
     def get_data(self):
-        return struct.pack("<Bf", self.pID, self.pValue)
+        return struct.pack("<Hf", self.pID, self.pValue)
 
 
 class StateGroupState:
     """
     ulStateID tid
+    # v154+
     cProps u16
     pProps AkPropBundle[]
+    # v141
+    ulStateInstanceID tid
     """
+    
+    @classmethod
+    def from_memory_stream(cls, stream: MemoryStream):
+        if g_bnk_version >= 154:
+            ulStateID = stream.uint32_read()
+            cProps = stream.uint16_read()
+            pProps = [AkPropBundle(stream.uint16_read(), stream.float_read()) for _ in range(cProps)]
+            return cls(ulStateID, cProps=cProps, pProps=pProps)
+        else:
+            ulStateID = stream.uint32_read()
+            ulStateInstanceID = stream.uint32_read()
+            return cls(ulStateID, ulStateInstanceID=ulStateInstanceID)
 
-    def __init__(self, ulStateID: int = 0, cProps: int = 0, pProps: list[AkPropBundle] = []):
+    def __init__(self, ulStateID: int = 0, ulStateInstanceID: int = 0, cProps: int = 0, pProps: list[AkPropBundle] = []):
        self.ulStateID = ulStateID 
+       self.ulStateInstanceID = ulStateInstanceID
        self.cProps = cProps
        self.pProps = pProps
+       assert_equal("# of props != # of prop. IDs", self.cProps, len(self.pProps))
 
     def get_data(self):
         b = struct.pack("<IH", self.ulStateID, self.cProps)
@@ -2770,7 +2826,10 @@ class StateGroup:
     """
     ulStateGroupID tid
     eStateSyncType U8x
+    # v154+
     states StateGroupState[]
+    # v141
+    ulNumStates var (assume 8 bits, can be more)
     """
 
     def __init__(
@@ -2935,6 +2994,9 @@ class BaseParam:
         self.uNumFxMetadata: int = 0
         self.fxChunksMetadata: list[FxChunkMetadata] = []
 
+        # v141
+        self.bOverrideAttachmentParams: int = 0
+
         self.overrideBusId: int = 0
         self.directParentID: int = 0
         self.byBitVectorA: int = 0
@@ -2964,11 +3026,7 @@ class BaseParam:
         if baseParam.uNumFx > 0:
             baseParam.bBypassAll = stream.uint8_read()
             baseParam.fxChunks = [
-                FxChunk(
-                    stream.uint8_read(),
-                    stream.uint32_read(),
-                    stream.uint8_read(),
-                )
+                FxChunk.from_memory_stream(stream)
                 for _ in range(baseParam.uNumFx)
             ]
 
@@ -2984,6 +3042,9 @@ class BaseParam:
                 )
                 for _ in range(baseParam.uNumFxMetadata)
             ]
+
+        if g_bnk_version < 154:
+            baseParam.bOverrideAttachmentParams = stream.uint8_read()
 
         baseParam.overrideBusId = stream.uint32_read()
 
@@ -3031,15 +3092,10 @@ class BaseParam:
             eStateSyncType = stream.uint8_read()
             ulNumStates = stream.uint8_read()
 
-            states: list[StateGroupState] = []
-            for _ in range(ulNumStates):
-                ulStateID = stream.uint32_read()
-                cProps = stream.uint16_read()
-                pProps = [
-                    AkPropBundle(stream.uint16_read(), stream.float_read())
-                    for _ in range(cProps)
-                ]
-                states.append(StateGroupState(ulStateID, cProps, pProps))
+            states: list[StateGroupState] = [
+                StateGroupState.from_memory_stream(stream)
+                for _ in range(ulNumStates)
+            ]
 
             stateGroups.append(StateGroup(
                 ulStateGroupID,
@@ -3492,14 +3548,24 @@ class SwitchGroup:
 class SwitchParam:
     """
     ulNodeID tid
+    # v154+
     byBitVector U8x
+    # v141
+    byBitVectorPlayBack U8x
+    byBitVectorMode U8x
+
     fadeOutTime s32
     fadeInTime s32
     """
 
     def __init__(self):
         self.ulNodeID: int = 0
+        # v154+
         self.byBitVector: int = 0
+        # v141
+        self.byBitVectorPlayBack: int = 0
+        self.byBitVectorMode: int = 0
+
         self.fadeOutTime: int = 0
         self.fadeInTime: int = 0
 
@@ -3508,7 +3574,11 @@ class SwitchParam:
         param = SwitchParam()
 
         param.ulNodeID = stream.uint32_read()
-        param.byBitVector = stream.uint8_read()
+        if g_bnk_version >= 154:
+            param.byBitVector = stream.uint8_read()
+        else:
+            param.byBitVectorPlayBack = stream.uint8_read()
+            param.byBitVectorMode = stream.uint8_read()
         param.fadeOutTime = stream.int32_read()
         param.fadeInTime = stream.int32_read()
 
@@ -3516,7 +3586,7 @@ class SwitchParam:
 
     def get_data(self):
         b = struct.pack(
-            "<IBBii",
+            "<IBii",
             self.ulNodeID,
             self.byBitVector,
             self.fadeOutTime,
