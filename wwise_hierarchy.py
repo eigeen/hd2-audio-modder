@@ -231,15 +231,25 @@ class MusicSegment(HircEntry):
         entry.hierarchy_type = stream.uint8_read()
         entry.size = stream.uint32_read()
         entry.hierarchy_id = stream.uint32_read()
-        entry.unused_sections.append(stream.read(10))
-        entry.parent_id = stream.uint32_read()
-        entry.unused_sections.append(stream.read(1))
-        n = stream.uint8_read() #number of props
-        stream.seek(stream.tell()-1)
-        entry.unused_sections.append(stream.read(5*n + 1))
-        n = stream.uint8_read() #number of props (again)
-        stream.seek(stream.tell()-1)
-        entry.unused_sections.append(stream.read(5*n + 1 + 12 + 4)) #the 4 is the count of state props, state chunks, and RTPC, which are currently always 0
+        
+        # MusicNodeParams
+        stream.uint8_read() # uFlags
+        #   NodeBaseParams
+        BaseParam.from_memory_stream(stream)
+        # #   Children
+        # stream.uint32_read() # ulNumChilds
+        # for _ in range(stream.uint32_read()):
+        #     stream.uint32_read() # ulChildID
+        
+        # entry.unused_sections.append(stream.read(10))
+        # entry.parent_id = stream.uint32_read()
+        # entry.unused_sections.append(stream.read(1))
+        # n = stream.uint8_read() #number of props
+        # stream.seek(stream.tell()-1)
+        # entry.unused_sections.append(stream.read(5*n + 1))
+        # n = stream.uint8_read() #number of props (again)
+        # stream.seek(stream.tell()-1)
+        # entry.unused_sections.append(stream.read(5*n + 1 + 12 + 4)) #the 4 is the count of state props, state chunks, and RTPC, which are currently always 0
         n = stream.uint32_read() #number of children (tracks)
         for _ in range(n):
             entry.tracks.append(stream.uint32_read())
@@ -534,17 +544,26 @@ class MusicTrack(HircEntry):
         entry.size = stream.uint32_read()
         start_position = stream.tell()
         entry.hierarchy_id = stream.uint32_read()
-        entry.bit_flags = stream.uint8_read()
+        # v141
+        if g_bnk_version < 154:
+            entry.bit_flags = stream.uint8_read()
+
         num_sources = stream.uint32_read()
         for _ in range(num_sources):
             source = BankSourceStruct.from_memory_stream(stream)
             entry.sources.append(source)
+
+        # v154+
+        if g_bnk_version >= 154:
+            entry.bit_flags = stream.uint8_read()
+
         num_track_info = stream.uint32_read()
         for _ in range(num_track_info):
             track = TrackInfoStruct.from_bytes(stream.read(44))
             entry.track_info.append(track)
         entry.unused_sections.append(stream.read(4))
         num_clip_automations = stream.uint32_read()
+        print(f"num_clip_automations: {num_clip_automations}")
         for _ in range(num_clip_automations):
             entry.clip_automations.append(ClipAutomationStruct.from_memory_stream(stream))
         entry.unused_sections.append(stream.read(5))
@@ -2089,7 +2108,8 @@ class WwiseHierarchy:
         reader.write(hierarchy_data)
         reader.seek(0)
         num_items = reader.uint32_read()
-        for _ in range(num_items):
+        for i in range(num_items):
+            print(f"loading entry {i}")
             entry = HircEntryFactory.from_memory_stream(reader)
             entry.soundbanks.append(self.soundbank)
             self.entries[entry.get_id()] = entry

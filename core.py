@@ -795,6 +795,7 @@ class GameArchive:
                 try:
                     # temporary use global variable
                     wwise_hierarchy.g_bnk_version = entry.version
+                    print(f"loading hirc for bank {entry.file_id}")
                     hirc.load(bank.chunks['HIRC'])
                 except KeyError:
                     pass
